@@ -755,12 +755,15 @@ if uploaded_files:
                             pf_mfg   = str(row.get("_제약사","")).strip()
                             pf_price = row.get("_단가", None)
                             mfg_v, price_v, is_nongov = get_price_info(drug, price_df)
+                            # price_v / pf_price 모두 NaN 방어 처리
+                            price_v_safe   = None if (price_v is None   or (isinstance(price_v,   float) and pd.isna(price_v)))   else price_v
+                            pf_price_safe  = None if (pf_price is None  or (isinstance(pf_price,  float) and pd.isna(pf_price)))  else pf_price
                             if is_nongov:
                                 단가 = "비급여"; 매출액 = None
-                            elif price_v is not None:
-                                단가 = int(price_v); 매출액 = qty_val * 단가
-                            elif pf_price is not None and pd.notna(pf_price):
-                                단가 = int(float(pf_price)); 매출액 = qty_val * 단가
+                            elif price_v_safe is not None:
+                                단가 = int(price_v_safe); 매출액 = qty_val * 단가
+                            elif pf_price_safe is not None:
+                                단가 = int(float(pf_price_safe)); 매출액 = qty_val * 단가
                             else:
                                 단가 = None; 매출액 = None; mfg_v = None
                             if not mfg_v and pf_mfg not in ["","nan","NaN"]:

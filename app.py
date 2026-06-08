@@ -161,14 +161,18 @@ def parse_with_config(df, cfg):
     raw = raw[raw[drug_col].notna()]
     raw = raw[~raw[drug_col].astype(str).isin(["소계","합계","nan","NaN"])]
 
-    raw["_약품명"]  = raw[drug_col].astype(str).str.strip()
-    raw["_수량"]   = pd.to_numeric(raw[qty_col],   errors="coerce").fillna(0)
-    raw["_제약사"]  = raw[mfg_col].astype(str).str.strip() if mfg_col >= 0 else ""
+    raw["_약품명"] = raw[drug_col].astype(str).str.strip()
+    raw["_수량"]   = pd.to_numeric(raw[qty_col], errors="coerce").fillna(0).astype(float)
+    raw["_제약사"] = raw[mfg_col].astype(str).str.strip() if mfg_col >= 0 else ""
     raw["_단가"]   = pd.to_numeric(raw[price_col], errors="coerce") if price_col >= 0 else None
 
+    # 빈 약품명·NaN 제거
+    raw = raw[raw["_약품명"].notna()]
+    raw = raw[raw["_약품명"].str.strip() != ""]
+    raw = raw[~raw["_약품명"].isin(["nan","NaN","None","소계","합계"])]
     raw = raw[raw["_수량"] > 0]
 
-    # 약품명+제약사+단가 기준 합산 (진료과별 중복 제거)
+    # 약품명+제약사+단가 기준 합산
     group_keys = ["_약품명", "_제약사"]
     if price_col >= 0:
         group_keys.append("_단가")
@@ -176,10 +180,12 @@ def parse_with_config(df, cfg):
 
     data = pd.DataFrame()
     data["약품명"]   = grouped["_약품명"]
-    data["합계수량"] = grouped["_수량"].astype(int)
+    data["합계수량"] = grouped["_수량"].fillna(0).astype(int)
     data["_제약사"]  = grouped["_제약사"]
-    data["_단가"]   = grouped["_단가"] if "_단가" in grouped.columns else None
-    data["수가코드"] = data["약품명"].apply(lambda x: re.sub(r"[^A-Za-z0-9가-힣]","",str(x))[:10])
+    data["_단가"]    = grouped["_단가"] if "_단가" in grouped.columns else None
+    data["수가코드"] = data["약품명"].apply(
+        lambda x: re.sub(r"[^A-Za-z0-9가-힣]", "", str(x))[:10]
+    )
     return data.reset_index(drop=True)
 
 def parse_ocs_file(uploaded_file, price_df, col_config=None):
@@ -220,9 +226,10 @@ def parse_ocs_file(uploaded_file, price_df, col_config=None):
         mfg_b = re.search(r"\(([^()]+)\)\s*$", drug)
         제약사 = mfg if mfg else (mfg_b.group(1) if mfg_b else "")
 
+        qty_safe = int(float(row["합계수량"])) if pd.notna(row["합계수량"]) else 0
         rows.append({"병원명":hospital,"조회기간":period,"수가코드":row["수가코드"],
                      "약품명":drug,"제약사":제약사,"약가(단가)":단가,
-                     "판매수량":int(row["합계수량"]),"매출액":매출액,
+                     "판매수량":qty_safe,"매출액":매출액,
                      "신뢰도":"정상" if (is_nongov or price is not None) else "미매핑"})
     return pd.DataFrame(rows), hospital, period
 
@@ -752,10 +759,11 @@ if uploaded_files:
                             if not mfg_v and pf_mfg: mfg_v = str(pf_mfg)
                             mfg_b = re.search(r"\(([^()]+)\)\s*$", drug)
                             제약사 = mfg_v if mfg_v else (mfg_b.group(1) if mfg_b else "")
-                            rows.append({"병원명":hosp,"조회기간":period,"수가코드":row["수가코드"],
-                                         "약품명":drug,"제약사":제약사,"약가(단가)":단가,
-                                         "판매수량":int(row["합계수량"]),"매출액":매출액,
-                                         "신뢰도":"정상" if (is_nongov or price_v is not None) else "미매핑"})
+                            qty_val = int(float(row["합계수량"])) if pd.notna(row["합계수량"]) else 0
+                        rows.append({"병원명":hosp,"조회기간":period,"수가코드":row["수가코드"],
+                                     "약품명":drug,"제약사":제약사,"약가(단가)":단가,
+                                     "판매수량":qty_val,"매출액":매출액,
+                                     "신뢰도":"정상" if (is_nongov or price_v is not None) else "미매핑"})
                         enrich_df = pd.DataFrame(rows)
                         db2 = load_db()
                         db2 = upsert_db(db2, enrich_df)

@@ -117,41 +117,25 @@ def preview_file(uploaded_file):
 def auto_detect_columns(df):
     """헤더에서 컬럼 자동 추정 (사용자 확인용 기본값 제공)"""
     header_row = 0
-    # 헤더 행 찾기 (처음 5행 중 텍스트가 가장 많은 행)
     for i in range(min(3, len(df))):
-        vals = df.iloc[i].astype(str).tolist()
-        if any(k in vals for k in ["처방명칭","약품명","재  료  대  명","품목명"]):
+        vals = [str(v) for v in df.iloc[i].tolist()]
+        if any(k in " ".join(vals) for k in ["처방명칭","약품명","재  료  대  명","품목명"]):
             header_row = i
             break
 
-    header = df.iloc[header_row].astype(str).tolist()
+    header = [str(v) for v in df.iloc[header_row].tolist()]
     n_cols = len(header)
 
-    # 약품명 컬럼 추정
-    drug_col = 2
-    for ci, v in enumerate(header):
-        if any(k in v for k in ["처방명칭","약품명","품목명","재  료  대  명"]):
-            drug_col = ci; break
+    def find_col(keywords, default):
+        for ci, v in enumerate(header):
+            if any(k in v for k in keywords):
+                return ci
+        return default
 
-    # 합계 컬럼 추정
-    qty_col = n_cols - 1
-    for ci, v in enumerate(header):
-        if v.strip() == "합계":
-            qty_col = ci; break
-
-    # 제약사 컬럼 추정
-    mfg_col = 1
-    for ci, v in enumerate(header):
-        if any(k in v for k in ["제약","제조","업체","회사"]):
-            mfg_col = ci; break
-
-    # 단가 컬럼 추정
-    price_col = -1
-    for ci, v in enumerate(header):
-        if "단가" in v or "약가" in v:
-            price_col = ci; break
-
-    # 데이터 시작행 추정
+    drug_col  = find_col(["처방명칭","약품명","품목명","재  료  대  명"], 2)
+    qty_col   = find_col(["합계"], n_cols - 1)
+    mfg_col   = find_col(["제약","제조","업체","회사"], 1)
+    price_col = find_col(["단가","약가"], -1)
     data_start = header_row + 1
 
     return {
@@ -675,47 +659,54 @@ if uploaded_files:
                 st.dataframe(preview_show, use_container_width=True, hide_index=False)
 
                 st.markdown("---")
-                st.markdown("**⚙️ 컬럼 번호 선택** — 드롭다운에서 해당 컬럼을 골라주세요")
-                col_labels = [f"{i}번: {str(cfg_auto['header'][i])[:15]}" for i in range(n_cols)]
+                st.markdown("**⚙️ STEP 2 — 아래 항목을 하나씩 선택해주세요**")
 
-                c1, c2, c3, c4, c5 = st.columns(5)
-                with c1:
-                    drug_col = st.selectbox(
-                        "💊 약품명 컬럼 (처방명칭·약품명·품목명)",
-                        range(n_cols), index=cfg_auto["drug_col"],
-                        format_func=lambda i: col_labels[i],
-                        key=f"drug_{fail_file.name}"
+                # 컬럼 선택 버튼 카드 UI
+                col_labels = [f"[{i}] {str(cfg_auto['header'][i])[:12]}" for i in range(n_cols)]
+
+                def col_selector(label, emoji, hint, key, default_idx, options=None, allow_none=False):
+                    st.markdown(
+                        f"<div style='background:#f0f4f8;border-radius:10px;padding:12px 16px;"
+                        f"margin-bottom:10px;border-left:4px solid #2E75B6'>"
+                        f"<b>{emoji} {label}</b><br>"
+                        f"<span style='font-size:12px;color:#666'>{hint}</span></div>",
+                        unsafe_allow_html=True
                     )
-                with c2:
-                    qty_col = st.selectbox(
-                        "🔢 합계수량 컬럼 (합계·총수량)",
-                        range(n_cols), index=cfg_auto["qty_col"],
-                        format_func=lambda i: col_labels[i],
-                        key=f"qty_{fail_file.name}"
-                    )
-                with c3:
-                    mfg_col = st.selectbox(
-                        "🏭 제약사 컬럼 (제약회사·업체명)",
-                        range(n_cols), index=cfg_auto["mfg_col"],
-                        format_func=lambda i: col_labels[i],
-                        key=f"mfg_{fail_file.name}"
-                    )
-                with c4:
-                    price_options = [-1] + list(range(n_cols))
-                    price_idx     = price_options.index(cfg_auto["price_col"]) if cfg_auto["price_col"] in price_options else 0
-                    price_col = st.selectbox(
-                        "💰 단가 컬럼 (단가·약가·없으면 없음)",
-                        price_options, index=price_idx,
-                        format_func=lambda i: "없음" if i==-1 else col_labels[i],
-                        key=f"price_{fail_file.name}"
-                    )
-                with c5:
-                    data_start = st.number_input(
-                        "📌 데이터 시작 행 (약품 데이터가 시작되는 행번호, 보통 1)",
-                        min_value=0, max_value=20,
-                        value=cfg_auto["data_start"],
-                        key=f"start_{fail_file.name}"
-                    )
+                    opt_list = options if options else list(range(n_cols))
+                    fmt_fn   = (lambda i: "없음" if i == -1 else col_labels[i])
+                    idx      = min(default_idx, len(opt_list)-1)
+                    return st.selectbox("선택", opt_list, index=idx,
+                                        format_func=fmt_fn, key=key,
+                                        label_visibility="collapsed")
+
+                drug_col = col_selector(
+                    "약품명 컬럼", "💊",
+                    "표에서 '약품명' '처방명칭' '품목명' 이라고 쓰인 컬럼 번호를 고르세요",
+                    f"drug_{fail_file.name}", cfg_auto["drug_col"]
+                )
+                qty_col = col_selector(
+                    "합계수량 컬럼", "🔢",
+                    "표에서 '합계' '총수량' 이라고 쓰인 컬럼 번호를 고르세요",
+                    f"qty_{fail_file.name}", cfg_auto["qty_col"]
+                )
+                mfg_col = col_selector(
+                    "제약사 컬럼", "🏭",
+                    "표에서 '제약회사' '업체명' '제조사' 이라고 쓰인 컬럼 번호를 고르세요",
+                    f"mfg_{fail_file.name}", cfg_auto["mfg_col"]
+                )
+                price_options = [-1] + list(range(n_cols))
+                price_idx     = price_options.index(cfg_auto["price_col"]) if cfg_auto["price_col"] in price_options else 0
+                price_col = col_selector(
+                    "단가 컬럼", "💰",
+                    "표에서 '단가' '약가' 이라고 쓰인 컬럼 번호를 고르세요. 없으면 '없음'을 선택하세요",
+                    f"price_{fail_file.name}", price_idx, options=price_options
+                )
+                data_start = st.number_input(
+                    "📌 데이터 시작 행번호  (약품 데이터가 시작되는 행. 표에서 첫 번째 약품이 있는 행 번호예요. 보통 1)",
+                    min_value=0, max_value=20,
+                    value=cfg_auto["data_start"],
+                    key=f"start_{fail_file.name}"
+                )
 
                 # 미리보기
                 cfg_manual = {

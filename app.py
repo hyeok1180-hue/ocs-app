@@ -201,36 +201,48 @@ def parse_ocs_file(uploaded_file, price_df, col_config=None):
         col_config = auto_detect_columns(df)
 
     data = parse_with_config(df, col_config)
+    # ── 합계수량 NaN 완전 제거 ──────────────────────────────
+    data["합계수량"] = pd.to_numeric(data["합계수량"], errors="coerce").fillna(0).astype(int)
+    data = data[data["합계수량"] > 0].reset_index(drop=True)
+
+    def safe_int(v):
+        """None / NaN / 문자열 모두 안전하게 int 변환"""
+        try:
+            f = float(v)
+            return None if (f != f) else int(f)   # NaN check: f != f
+        except Exception:
+            return None
+
     rows = []
     for _, row in data.iterrows():
-        drug = row["약품명"]
-        # 형식B는 이미 단가/제약사 정보 보유
-        prefilled_mfg   = row.get("_제약사", None)
-        prefilled_price = row.get("_단가",   None)
+        drug = str(row["약품명"]).strip()
+        if not drug or drug in ["nan","NaN","None"]: continue
+        qty_val = int(row["합계수량"])
+
+        prefilled_mfg   = str(row.get("_제약사","")).strip()
+        prefilled_price = safe_int(row.get("_단가", None))
 
         mfg, price, is_nongov = get_price_info(drug, price_df)
+        price_safe = safe_int(price)
 
         if is_nongov:
             단가 = "비급여"; 매출액 = None
-        elif price is not None:
-            단가 = int(price); 매출액 = int(row["합계수량"] * price)
-        elif pd.notna(prefilled_price) if prefilled_price is not None else False:
-            # 보험약가 미매핑이지만 파일에 단가 있는 경우
-            단가 = int(prefilled_price)
-            매출액 = int(row["합계수량"] * prefilled_price)
+        elif price_safe is not None:
+            단가 = price_safe; 매출액 = qty_val * 단가
+        elif prefilled_price is not None:
+            단가 = prefilled_price; 매출액 = qty_val * 단가
         else:
             단가 = None; 매출액 = None; mfg = None
 
-        if not mfg and prefilled_mfg:
-            mfg = str(prefilled_mfg)
+        if not mfg and prefilled_mfg not in ["","nan","NaN"]:
+            mfg = prefilled_mfg
         mfg_b = re.search(r"\(([^()]+)\)\s*$", drug)
         제약사 = mfg if mfg else (mfg_b.group(1) if mfg_b else "")
 
-        qty_safe = int(float(row["합계수량"])) if pd.notna(row["합계수량"]) else 0
-        rows.append({"병원명":hospital,"조회기간":period,"수가코드":row["수가코드"],
+        rows.append({"병원명":hospital,"조회기간":period,"수가코드":str(row["수가코드"])[:10],
                      "약품명":drug,"제약사":제약사,"약가(단가)":단가,
-                     "판매수량":qty_safe,"매출액":매출액,
-                     "신뢰도":"정상" if (is_nongov or price is not None) else "미매핑"})
+                     "판매수량":qty_val,"매출액":매출액,
+                     "신뢰도":"정상" if (is_nongov or price_safe is not None) else "미매핑"})
     return pd.DataFrame(rows), hospital, period
 
 # ─────────────────────────────────────────────

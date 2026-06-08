@@ -728,51 +728,64 @@ if uploaded_files:
                 }
                 try:
                     preview_data = parse_with_config(df_preview, cfg_manual)
+                    # ── NaN 안전 변환 ──────────────────────────
+                    preview_data["합계수량"] = (
+                        pd.to_numeric(preview_data["합계수량"], errors="coerce")
+                        .fillna(0).astype(int)
+                    )
+                    preview_data = preview_data[preview_data["합계수량"] > 0].reset_index(drop=True)
+
                     st.success(f"설정 확인 완료 — 총 {len(preview_data)}개 약품이 추출됩니다!")
                     st.markdown("**👇 약품명·수량·제약사가 올바른지 확인 후 저장 버튼을 눌러주세요**")
                     preview_show2 = preview_data[["약품명","합계수량","_제약사"]].head(5).copy()
-                    preview_show2.columns = ["약품명", "합계수량(개)", "제약사"]
+                    preview_show2.columns = ["약품명","합계수량(개)","제약사"]
                     st.dataframe(preview_show2, use_container_width=True, hide_index=True)
                     st.caption("👆 내용이 맞으면 아래 저장 버튼, 틀리면 위 드롭다운을 다시 선택하세요.")
+
                     if st.button(f"✅ 이 설정으로 저장", key=f"save_{fail_file.name}"):
-                        m = re.match(r"(.+?)(\d{6})", fail_file.name)
-                        hosp       = m.group(1) if m else fail_file.name
-                        period_str = m.group(2) if m else ""
-                        period     = f"{period_str[:4]}-{period_str[4:6]}" if len(period_str)==6 else period_str
-                        full_data  = parse_with_config(df_preview, cfg_manual)
-                        result_df, _, _ = parse_ocs_file.__wrapped__ if hasattr(parse_ocs_file,"__wrapped__") else (None,None,None)
-                        # enrich 직접 호출
+                        m2 = re.match(r"(.+?)(\d{6})", fail_file.name)
+                        hosp2       = m2.group(1) if m2 else fail_file.name
+                        period_str2 = m2.group(2) if m2 else ""
+                        period2     = f"{period_str2[:4]}-{period_str2[4:6]}" if len(period_str2)==6 else period_str2
                         rows = []
-                        for _, row in full_data.iterrows():
-                            drug = row["약품명"]
+                        for _, row in preview_data.iterrows():
+                            drug = str(row["약품명"]).strip()
+                            if not drug or drug in ["nan","NaN","None"]: continue
+                            qty_val  = int(row["합계수량"])
+                            pf_mfg   = str(row.get("_제약사","")).strip()
+                            pf_price = row.get("_단가", None)
                             mfg_v, price_v, is_nongov = get_price_info(drug, price_df)
-                            pf_mfg   = row.get("_제약사", None)
-                            pf_price = row.get("_단가",   None)
                             if is_nongov:
                                 단가 = "비급여"; 매출액 = None
                             elif price_v is not None:
-                                단가 = int(price_v); 매출액 = int(row["합계수량"] * price_v)
+                                단가 = int(price_v); 매출액 = qty_val * 단가
                             elif pf_price is not None and pd.notna(pf_price):
-                                단가 = int(pf_price); 매출액 = int(row["합계수량"] * pf_price)
+                                단가 = int(float(pf_price)); 매출액 = qty_val * 단가
                             else:
                                 단가 = None; 매출액 = None; mfg_v = None
-                            if not mfg_v and pf_mfg: mfg_v = str(pf_mfg)
+                            if not mfg_v and pf_mfg not in ["","nan","NaN"]:
+                                mfg_v = pf_mfg
                             mfg_b = re.search(r"\(([^()]+)\)\s*$", drug)
                             제약사 = mfg_v if mfg_v else (mfg_b.group(1) if mfg_b else "")
-                            qty_val = int(float(row["합계수량"])) if pd.notna(row["합계수량"]) else 0
-                        rows.append({"병원명":hosp,"조회기간":period,"수가코드":row["수가코드"],
-                                     "약품명":drug,"제약사":제약사,"약가(단가)":단가,
-                                     "판매수량":qty_val,"매출액":매출액,
-                                     "신뢰도":"정상" if (is_nongov or price_v is not None) else "미매핑"})
+                            rows.append({
+                                "병원명": hosp2, "조회기간": period2,
+                                "수가코드": str(row.get("수가코드",""))[:10],
+                                "약품명": drug, "제약사": 제약사,
+                                "약가(단가)": 단가, "판매수량": qty_val,
+                                "매출액": 매출액,
+                                "신뢰도": "정상" if (is_nongov or price_v is not None) else "미매핑"
+                            })
                         enrich_df = pd.DataFrame(rows)
                         db2 = load_db()
                         db2 = upsert_db(db2, enrich_df)
                         save_db(db2)
-                        parsed.append((enrich_df, hosp, period))
-                        st.success("🎉 저장 완료! 잠시 후 자동으로 새로고침되면 아래 분석 실행 버튼을 눌러주세요.")
+                        parsed.append((enrich_df, hosp2, period2))
+                        st.success("🎉 저장 완료! 잠시 후 페이지가 새로고침됩니다.")
                         st.rerun()
                 except Exception as e2:
-                    st.error(f"미리보기 오류: {e2}")
+                    import traceback
+                    st.error(f"오류: {e2}")
+                    st.code(traceback.format_exc())
 
     if not parsed: st.stop()
 

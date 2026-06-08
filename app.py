@@ -114,8 +114,34 @@ def parse_ocs_file(uploaded_file, price_df):
     hospital   = m.group(1) if m else fname
     period_str = m.group(2) if m else ""
     period     = f"{period_str[:4]}-{period_str[4:6]}" if len(period_str)==6 else period_str
-    df   = pd.read_excel(uploaded_file, sheet_name="Sheet1", header=None)
-    data = df.iloc[2:].copy()[[1,2,57]]
+    df = pd.read_excel(uploaded_file, sheet_name="Sheet1", header=None)
+
+    # ── 헤더 행 자동 탐지 (수가코드/합계 행 찾기) ──────────────
+    header_row = 1  # 기본값
+    for i in range(min(5, len(df))):
+        row_vals = df.iloc[i].astype(str).tolist()
+        if any("합계" in v or "수가코드" in v for v in row_vals):
+            header_row = i
+            break
+
+    # ── 합계 컬럼 자동 탐지 ─────────────────────────────────
+    header = df.iloc[header_row].astype(str).tolist()
+    qty_col = None
+    for ci, val in enumerate(header):
+        if "합계" in val:
+            qty_col = ci
+            break
+    # 합계 컬럼을 못 찾으면 마지막 숫자형 컬럼 사용
+    if qty_col is None:
+        qty_col = len(header) - 1
+        for ci in range(len(header)-1, -1, -1):
+            col_data = pd.to_numeric(df.iloc[header_row+1:, ci], errors="coerce")
+            if col_data.notna().sum() > 5:
+                qty_col = ci
+                break
+
+    # 약품명 컬럼 = 2번, 수가코드 = 1번 (고정)
+    data = df.iloc[header_row+1:].copy()[[1, 2, qty_col]]
     data.columns = ["수가코드","약품명","합계수량"]
     data = data.dropna(subset=["약품명"])
     data["합계수량"] = pd.to_numeric(data["합계수량"], errors="coerce").fillna(0).astype(int)

@@ -24,7 +24,7 @@ st.set_page_config(
 # Streamlit Cloud는 실행 위치가 저장소 루트이므로 파일명만 사용
 import pathlib
 _ROOT = pathlib.Path(__file__).parent if "__file__" in dir() else pathlib.Path.cwd()
-PRICE_FILE = str(_ROOT / "약제급여목록및급여상한금액표_2026_4_1__공개용_1부.xlsx")
+PRICE_FILE = str(_ROOT / "drugprice.xlsx")
 DB_FILE    = str(_ROOT / "ocs_history.json")
 DAEWUNG_KW = ["대웅", "대웅제약", "대웅바이오"]
 

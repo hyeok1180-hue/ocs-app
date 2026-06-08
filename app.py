@@ -108,56 +108,134 @@ def get_price_info(drug_name, price_df):
 # ─────────────────────────────────────────────
 # 파일 파싱
 # ─────────────────────────────────────────────
-def parse_ocs_file(uploaded_file, price_df):
+def preview_file(uploaded_file):
+    """파일 미리보기 - 헤더 행과 컬럼 목록 반환"""
+    df = pd.read_excel(uploaded_file, sheet_name=0, header=None)
+    uploaded_file.seek(0)  # 다음 읽기를 위해 리셋
+    return df
+
+def auto_detect_columns(df):
+    """헤더에서 컬럼 자동 추정 (사용자 확인용 기본값 제공)"""
+    header_row = 0
+    # 헤더 행 찾기 (처음 5행 중 텍스트가 가장 많은 행)
+    for i in range(min(3, len(df))):
+        vals = df.iloc[i].astype(str).tolist()
+        if any(k in vals for k in ["처방명칭","약품명","재  료  대  명","품목명"]):
+            header_row = i
+            break
+
+    header = df.iloc[header_row].astype(str).tolist()
+    n_cols = len(header)
+
+    # 약품명 컬럼 추정
+    drug_col = 2
+    for ci, v in enumerate(header):
+        if any(k in v for k in ["처방명칭","약품명","품목명","재  료  대  명"]):
+            drug_col = ci; break
+
+    # 합계 컬럼 추정
+    qty_col = n_cols - 1
+    for ci, v in enumerate(header):
+        if v.strip() == "합계":
+            qty_col = ci; break
+
+    # 제약사 컬럼 추정
+    mfg_col = 1
+    for ci, v in enumerate(header):
+        if any(k in v for k in ["제약","제조","업체","회사"]):
+            mfg_col = ci; break
+
+    # 단가 컬럼 추정
+    price_col = -1
+    for ci, v in enumerate(header):
+        if "단가" in v or "약가" in v:
+            price_col = ci; break
+
+    # 데이터 시작행 추정
+    data_start = header_row + 1
+
+    return {
+        "header_row": header_row,
+        "data_start": data_start,
+        "drug_col":   drug_col,
+        "qty_col":    qty_col,
+        "mfg_col":    mfg_col,
+        "price_col":  price_col,
+        "n_cols":     n_cols,
+        "header":     header,
+    }
+
+def parse_with_config(df, cfg):
+    """컬럼 설정에 따라 파싱"""
+    raw = df.iloc[cfg["data_start"]:].copy()
+
+    drug_col  = cfg["drug_col"]
+    qty_col   = cfg["qty_col"]
+    mfg_col   = cfg["mfg_col"]
+    price_col = cfg["price_col"]
+
+    raw = raw[raw[drug_col].notna()]
+    raw = raw[~raw[drug_col].astype(str).isin(["소계","합계","nan","NaN"])]
+
+    raw["_약품명"]  = raw[drug_col].astype(str).str.strip()
+    raw["_수량"]   = pd.to_numeric(raw[qty_col],   errors="coerce").fillna(0)
+    raw["_제약사"]  = raw[mfg_col].astype(str).str.strip() if mfg_col >= 0 else ""
+    raw["_단가"]   = pd.to_numeric(raw[price_col], errors="coerce") if price_col >= 0 else None
+
+    raw = raw[raw["_수량"] > 0]
+
+    # 약품명+제약사+단가 기준 합산 (진료과별 중복 제거)
+    group_keys = ["_약품명", "_제약사"]
+    if price_col >= 0:
+        group_keys.append("_단가")
+    grouped = raw.groupby(group_keys, dropna=False)["_수량"].sum().reset_index()
+
+    data = pd.DataFrame()
+    data["약품명"]   = grouped["_약품명"]
+    data["합계수량"] = grouped["_수량"].astype(int)
+    data["_제약사"]  = grouped["_제약사"]
+    data["_단가"]   = grouped["_단가"] if "_단가" in grouped.columns else None
+    data["수가코드"] = data["약품명"].apply(lambda x: re.sub(r"[^A-Za-z0-9가-힣]","",str(x))[:10])
+    return data.reset_index(drop=True)
+
+def parse_ocs_file(uploaded_file, price_df, col_config=None):
     fname = uploaded_file.name
     m = re.match(r"(.+?)(\d{6})", fname)
     hospital   = m.group(1) if m else fname
     period_str = m.group(2) if m else ""
     period     = f"{period_str[:4]}-{period_str[4:6]}" if len(period_str)==6 else period_str
-    df = pd.read_excel(uploaded_file, sheet_name="Sheet1", header=None)
 
-    # ── 헤더 행 자동 탐지 (수가코드/합계 행 찾기) ──────────────
-    header_row = 1  # 기본값
-    for i in range(min(5, len(df))):
-        row_vals = df.iloc[i].astype(str).tolist()
-        if any("합계" in v or "수가코드" in v for v in row_vals):
-            header_row = i
-            break
+    df  = pd.read_excel(uploaded_file, sheet_name=0, header=None)
 
-    # ── 합계 컬럼 자동 탐지 ─────────────────────────────────
-    header = df.iloc[header_row].astype(str).tolist()
-    qty_col = None
-    for ci, val in enumerate(header):
-        if "합계" in val:
-            qty_col = ci
-            break
-    # 합계 컬럼을 못 찾으면 마지막 숫자형 컬럼 사용
-    if qty_col is None:
-        qty_col = len(header) - 1
-        for ci in range(len(header)-1, -1, -1):
-            col_data = pd.to_numeric(df.iloc[header_row+1:, ci], errors="coerce")
-            if col_data.notna().sum() > 5:
-                qty_col = ci
-                break
+    if col_config is None:
+        col_config = auto_detect_columns(df)
 
-    # 약품명 컬럼 = 2번, 수가코드 = 1번 (고정)
-    data = df.iloc[header_row+1:].copy()[[1, 2, qty_col]]
-    data.columns = ["수가코드","약품명","합계수량"]
-    data = data.dropna(subset=["약품명"])
-    data["합계수량"] = pd.to_numeric(data["합계수량"], errors="coerce").fillna(0).astype(int)
-    data = data[data["합계수량"] > 0].reset_index(drop=True)
+    data = parse_with_config(df, col_config)
     rows = []
     for _, row in data.iterrows():
         drug = row["약품명"]
+        # 형식B는 이미 단가/제약사 정보 보유
+        prefilled_mfg   = row.get("_제약사", None)
+        prefilled_price = row.get("_단가",   None)
+
         mfg, price, is_nongov = get_price_info(drug, price_df)
+
         if is_nongov:
             단가 = "비급여"; 매출액 = None
         elif price is not None:
             단가 = int(price); 매출액 = int(row["합계수량"] * price)
+        elif pd.notna(prefilled_price) if prefilled_price is not None else False:
+            # 보험약가 미매핑이지만 파일에 단가 있는 경우
+            단가 = int(prefilled_price)
+            매출액 = int(row["합계수량"] * prefilled_price)
         else:
             단가 = None; 매출액 = None; mfg = None
+
+        if not mfg and prefilled_mfg:
+            mfg = str(prefilled_mfg)
         mfg_b = re.search(r"\(([^()]+)\)\s*$", drug)
         제약사 = mfg if mfg else (mfg_b.group(1) if mfg_b else "")
+
         rows.append({"병원명":hospital,"조회기간":period,"수가코드":row["수가코드"],
                      "약품명":drug,"제약사":제약사,"약가(단가)":단가,
                      "판매수량":int(row["합계수량"]),"매출액":매출액,
@@ -538,16 +616,164 @@ if uploaded_files:
         st.warning("⚠️ 보험약가 파일(xlsx)이 없습니다. 앱 폴더에 약가 파일을 넣어주세요.")
 
     db = load_db()
+
+    # ── 1차 시도: 자동 파싱 ───────────────────────────────
+    parsed       = []
+    failed_files = []
+
     with st.spinner("파일 분석 중..."):
-        parsed = []
         for f in uploaded_files:
             try:
                 df, hosp, period = parse_ocs_file(f, price_df)
+                if len(df) == 0:
+                    raise ValueError("추출된 데이터가 없습니다.")
                 parsed.append((df, hosp, period))
                 db = upsert_db(db, df)
             except Exception as e:
-                st.error(f"❌ {f.name} 파싱 오류: {e}")
-        save_db(db)
+                failed_files.append((f, str(e)))
+        if parsed:
+            save_db(db)
+
+    # ── 실패 파일: 컬럼 수동 지정 UI ─────────────────────
+    if failed_files:
+        st.markdown("---")
+        st.markdown("### ⚙️ 컬럼 직접 지정이 필요한 파일")
+        st.caption("자동 인식에 실패했어요. 아래에서 컬럼 번호를 직접 지정해주세요.")
+
+        for fail_file, err_msg in failed_files:
+            fail_file.seek(0)
+            df_preview = pd.read_excel(fail_file, sheet_name=0, header=None)
+            fail_file.seek(0)
+            cfg_auto   = auto_detect_columns(df_preview)
+            n_cols     = cfg_auto["n_cols"]
+
+            with st.expander(f"📄 {fail_file.name}  —  오류: {err_msg}", expanded=True):
+
+                # ── 가이드 안내 ──────────────────────────────
+                st.info(
+                    "**📌 처음이신가요? 아래 순서대로 따라하세요!**\n\n"
+                    "**STEP 1.** 아래 파일 미리보기 표를 확인하세요.\n"
+                    "- 표 맨 위 대괄호 안 숫자([0], [1], [2]…)가 **컬럼 번호**예요.\n\n"
+                    "**STEP 2.** 5개 드롭다운을 아래 기준으로 골라주세요.\n"
+                    "- 💊 **약품명**: '약품명' '처방명칭' '품목명' 이라고 쓰인 컬럼\n"
+                    "- 🔢 **합계수량**: '합계' '총수량' 이라고 쓰인 컬럼\n"
+                    "- 🏭 **제약사**: '제약회사' '업체명' 이라고 쓰인 컬럼\n"
+                    "- 💰 **단가**: '단가' '약가' 이라고 쓰인 컬럼 (없으면 없음 선택)\n"
+                    "- 📌 **데이터 시작 행**: 약품 데이터가 시작되는 행 번호 (보통 1)\n\n"
+                    "**STEP 3.** 미리보기에서 약품명·수량이 올바른지 확인하세요.\n\n"
+                    "**STEP 4.** ✅ 이 설정으로 저장 버튼을 클릭하세요!"
+                )
+
+                # ── 파일 미리보기 ────────────────────────────
+                st.markdown("**📋 파일 미리보기** (처음 5행 — 대괄호 숫자가 컬럼 번호예요)")
+                preview_show = df_preview.head(5).copy()
+                new_cols = []
+                for i in range(len(preview_show.columns)):
+                    hdr = str(cfg_auto["header"][i])[:10] if i < len(cfg_auto["header"]) else ""
+                    new_cols.append(f"[{i}] {hdr}")
+                preview_show.columns = new_cols
+                st.dataframe(preview_show, use_container_width=True, hide_index=False)
+
+                st.markdown("---")
+                st.markdown("**⚙️ 컬럼 번호 선택** — 드롭다운에서 해당 컬럼을 골라주세요")
+                col_labels = [f"{i}번: {str(cfg_auto['header'][i])[:15]}" for i in range(n_cols)]
+
+                c1, c2, c3, c4, c5 = st.columns(5)
+                with c1:
+                    drug_col = st.selectbox(
+                        "💊 약품명 컬럼 (처방명칭·약품명·품목명)",
+                        range(n_cols), index=cfg_auto["drug_col"],
+                        format_func=lambda i: col_labels[i],
+                        key=f"drug_{fail_file.name}"
+                    )
+                with c2:
+                    qty_col = st.selectbox(
+                        "🔢 합계수량 컬럼 (합계·총수량)",
+                        range(n_cols), index=cfg_auto["qty_col"],
+                        format_func=lambda i: col_labels[i],
+                        key=f"qty_{fail_file.name}"
+                    )
+                with c3:
+                    mfg_col = st.selectbox(
+                        "🏭 제약사 컬럼 (제약회사·업체명)",
+                        range(n_cols), index=cfg_auto["mfg_col"],
+                        format_func=lambda i: col_labels[i],
+                        key=f"mfg_{fail_file.name}"
+                    )
+                with c4:
+                    price_options = [-1] + list(range(n_cols))
+                    price_idx     = price_options.index(cfg_auto["price_col"]) if cfg_auto["price_col"] in price_options else 0
+                    price_col = st.selectbox(
+                        "💰 단가 컬럼 (단가·약가·없으면 없음)",
+                        price_options, index=price_idx,
+                        format_func=lambda i: "없음" if i==-1 else col_labels[i],
+                        key=f"price_{fail_file.name}"
+                    )
+                with c5:
+                    data_start = st.number_input(
+                        "📌 데이터 시작 행 (약품 데이터가 시작되는 행번호, 보통 1)",
+                        min_value=0, max_value=20,
+                        value=cfg_auto["data_start"],
+                        key=f"start_{fail_file.name}"
+                    )
+
+                # 미리보기
+                cfg_manual = {
+                    "header_row": cfg_auto["header_row"],
+                    "data_start": int(data_start),
+                    "drug_col":   int(drug_col),
+                    "qty_col":    int(qty_col),
+                    "mfg_col":    int(mfg_col),
+                    "price_col":  int(price_col),
+                    "n_cols":     n_cols,
+                    "header":     cfg_auto["header"],
+                }
+                try:
+                    preview_data = parse_with_config(df_preview, cfg_manual)
+                    st.success(f"설정 확인 완료 — 총 {len(preview_data)}개 약품이 추출됩니다!")
+                    st.markdown("**👇 약품명·수량·제약사가 올바른지 확인 후 저장 버튼을 눌러주세요**")
+                    preview_show2 = preview_data[["약품명","합계수량","_제약사"]].head(5).copy()
+                    preview_show2.columns = ["약품명", "합계수량(개)", "제약사"]
+                    st.dataframe(preview_show2, use_container_width=True, hide_index=True)
+                    st.caption("👆 내용이 맞으면 아래 저장 버튼, 틀리면 위 드롭다운을 다시 선택하세요.")
+                    if st.button(f"✅ 이 설정으로 저장", key=f"save_{fail_file.name}"):
+                        m = re.match(r"(.+?)(\d{6})", fail_file.name)
+                        hosp       = m.group(1) if m else fail_file.name
+                        period_str = m.group(2) if m else ""
+                        period     = f"{period_str[:4]}-{period_str[4:6]}" if len(period_str)==6 else period_str
+                        full_data  = parse_with_config(df_preview, cfg_manual)
+                        result_df, _, _ = parse_ocs_file.__wrapped__ if hasattr(parse_ocs_file,"__wrapped__") else (None,None,None)
+                        # enrich 직접 호출
+                        rows = []
+                        for _, row in full_data.iterrows():
+                            drug = row["약품명"]
+                            mfg_v, price_v, is_nongov = get_price_info(drug, price_df)
+                            pf_mfg   = row.get("_제약사", None)
+                            pf_price = row.get("_단가",   None)
+                            if is_nongov:
+                                단가 = "비급여"; 매출액 = None
+                            elif price_v is not None:
+                                단가 = int(price_v); 매출액 = int(row["합계수량"] * price_v)
+                            elif pf_price is not None and pd.notna(pf_price):
+                                단가 = int(pf_price); 매출액 = int(row["합계수량"] * pf_price)
+                            else:
+                                단가 = None; 매출액 = None; mfg_v = None
+                            if not mfg_v and pf_mfg: mfg_v = str(pf_mfg)
+                            mfg_b = re.search(r"\(([^()]+)\)\s*$", drug)
+                            제약사 = mfg_v if mfg_v else (mfg_b.group(1) if mfg_b else "")
+                            rows.append({"병원명":hosp,"조회기간":period,"수가코드":row["수가코드"],
+                                         "약품명":drug,"제약사":제약사,"약가(단가)":단가,
+                                         "판매수량":int(row["합계수량"]),"매출액":매출액,
+                                         "신뢰도":"정상" if (is_nongov or price_v is not None) else "미매핑"})
+                        enrich_df = pd.DataFrame(rows)
+                        db2 = load_db()
+                        db2 = upsert_db(db2, enrich_df)
+                        save_db(db2)
+                        parsed.append((enrich_df, hosp, period))
+                        st.success("🎉 저장 완료! 잠시 후 자동으로 새로고침되면 아래 분석 실행 버튼을 눌러주세요.")
+                        st.rerun()
+                except Exception as e2:
+                    st.error(f"미리보기 오류: {e2}")
 
     if not parsed: st.stop()
 

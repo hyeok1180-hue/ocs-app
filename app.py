@@ -19,8 +19,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-PRICE_FILE = "약제급여목록및급여상한금액표_2026_4_1__공개용_1부.xlsx"
-DB_FILE    = "ocs_history.json"   # 누적 데이터 저장소
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+PRICE_FILE = os.path.join(BASE_DIR, "약제급여목록및급여상한금액표_2026_4_1__공개용_1부.xlsx")
+DB_FILE    = os.path.join(BASE_DIR, "ocs_history.json")   # 누적 데이터 저장소
 DAEWUNG_KW = ["대웅", "대웅제약", "대웅바이오"]
 
 # ─────────────────────────────────────────────
